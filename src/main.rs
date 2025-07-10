@@ -2,15 +2,15 @@ mod config;
 mod credentials;
 
 use crate::config::Config;
-use crate::credentials::{get_password, set_password, delete_password};
+use crate::credentials::{delete_password, get_password, set_password};
 use anyhow::{anyhow, Context, Result};
-use std::net::TcpStream;
-use ssh2::Session;
-use std::io::{Read, Write, self};
-use inquire::Select;
-use crossterm::terminal;
-
 use clap::{Parser, Subcommand};
+use crossterm::terminal;
+use inquire::{Confirm, Password, Select, Text};
+use ssh2::Session;
+use std::io::{self, Read, Write};
+use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "rssh", version = "1.0", about = "A secure SSH login management tool")]
@@ -41,6 +41,8 @@ enum Commands {
         alias: String,
         #[arg(short, long, help = "The port to connect to", default_value_t = 22)]
         port: u16,
+        #[arg(short, long, help = "Path to the private key file")]
+        identity: Option<PathBuf>,
     },
 }
 
@@ -49,7 +51,10 @@ fn main() -> anyhow::Result<()> {
     let mut config = Config::load()?;
 
     match cli.command {
-        Some(Commands::Add { alias, connection_string }) => {
+        Some(Commands::Add {
+            alias,
+            connection_string,
+        }) => {
             config.connections.insert(alias.clone(), connection_string);
             config.save()?;
             println!("Connection '{}' added.", alias);
@@ -67,66 +72,112 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Remove { alias }) => {
             if config.connections.remove(&alias).is_some() {
                 config.save()?;
-                delete_password(&alias)?; // 同时删除存储的密码
+                delete_password(&alias)?;
                 println!("Connection '{}' removed.", alias);
             } else {
                 return Err(anyhow!("Alias '{}' not found.", alias));
             }
         }
-        Some(Commands::Connect { alias, port }) => {
-            handle_connect(&config, &alias, port)?;
+        Some(Commands::Connect {
+            alias,
+            port,
+            identity,
+        }) => {
+            handle_connect(&config, &alias, port, identity.as_deref())?;
         }
         None => {
-            // 交互式模式
+            // Interactive mode
             let aliases: Vec<String> = config.connections.keys().cloned().collect();
             if aliases.is_empty() {
                 println!("No connections saved. Use 'add' command first.");
                 return Ok(());
             }
             let choice = Select::new("Select a connection to open:", aliases).prompt()?;
-            let port_str = inquire::Text::new("Enter port:").with_default("22").prompt()?;
+            let port_str = Text::new("Enter port:").with_default("22").prompt()?;
             let port = port_str.parse::<u16>().context("Invalid port number")?;
-            handle_connect(&config, &choice, port)?;
+
+            let use_identity =
+                Confirm::new("Use identity file (private key)?")
+                    .with_default(false)
+                    .prompt()?;
+            let identity_path = if use_identity {
+                let path_str = Text::new("Enter path to private key:").prompt()?;
+                Some(PathBuf::from(path_str))
+            } else {
+                None
+            };
+
+            handle_connect(&config, &choice, port, identity_path.as_deref())?;
         }
     }
 
     Ok(())
 }
 
-// 连接处理函数
-fn handle_connect(config: &Config, alias: &str, port: u16) -> Result<()> {
-    let conn_str = config.connections.get(alias)
+fn handle_connect(
+    config: &Config,
+    alias: &str,
+    port: u16,
+    identity_path: Option<&Path>,
+) -> Result<()> {
+    let conn_str = config
+        .connections
+        .get(alias)
         .context(format!("Alias '{}' not found.", alias))?;
-    
+
     let parts: Vec<&str> = conn_str.split('@').collect();
     if parts.len() != 2 {
-        return Err(anyhow!("Invalid connection string format. Use 'user@host'."));
+        return Err(anyhow!(
+            "Invalid connection string format. Use 'user@host'."
+        ));
     }
     let user = parts[0];
     let host = parts[1];
 
-    // 尝试从 keychain 获取密码
-    let password = match get_password(alias) {
-        Ok(pass) => pass,
-        Err(_) => {
-            // 获取失败，提示用户输入并保存
-            let pass = inquire::Password::new("Enter password:")
-                .with_display_mode(inquire::PasswordDisplayMode::Masked)
-                .prompt()?;
-            set_password(alias, &pass)?;
-            pass
-        }
-    };
-    
-    // 建立 SSH 连接
     let tcp = TcpStream::connect(format!("{}:{}", host, port))
         .context(format!("Failed to connect to {}:{}", host, port))?;
     let mut sess = Session::new()?;
     sess.set_tcp_stream(tcp);
     sess.handshake()?;
-    
-    sess.userauth_password(user, &password)
-        .context("Authentication failed. Please check your username/password.")?;
+
+    if let Some(private_key_path) = identity_path {
+        let attempts = 0;
+        loop {
+            let auth_result =
+                sess.userauth_pubkey_file(user, None, private_key_path, None);
+
+            match auth_result {
+                Ok(_) => break,
+                Err(e) => {
+                    if e.to_string().contains("passphrase") && attempts < 1 {
+                        let passphrase = Password::new("Enter passphrase for key:")
+                            .with_display_mode(inquire::PasswordDisplayMode::Masked)
+                            .prompt()?;
+                        if sess
+                            .userauth_pubkey_file(user, None, private_key_path, Some(&passphrase))
+                            .is_ok()
+                        {
+                            break;
+                        }
+                    }
+                    return Err(anyhow!("Authentication failed with key: {}", e));
+                }
+            }
+        }
+    } else {
+        let password = match get_password(alias) {
+            Ok(pass) => pass,
+            Err(_) => {
+                let pass = Password::new("Enter password:")
+                    .with_display_mode(inquire::PasswordDisplayMode::Masked)
+                    .prompt()?;
+                set_password(alias, &pass)?;
+                pass
+            }
+        };
+        sess.userauth_password(user, &password)
+            .context("Authentication failed. Please check your username/password.")?;
+    }
 
     println!("Successfully connected to {}!", conn_str);
 
@@ -139,18 +190,13 @@ fn handle_connect(config: &Config, alias: &str, port: u16) -> Result<()> {
     )?;
     channel.shell()?;
 
-    // 进入 raw 模式
     terminal::enable_raw_mode()?;
-    
-    // 非阻塞
     sess.set_blocking(false);
 
     let mut stdout = io::stdout();
     let mut channel_buf = [0; 1024];
 
     'main_loop: loop {
-        // 从 stdin 读取并发送到 channel
-        // 使用 crossterm::event::poll 来非阻塞地检查输入
         if crossterm::event::poll(std::time::Duration::from_millis(10))? {
             if let Ok(event) = crossterm::event::read() {
                 match event {
@@ -158,12 +204,13 @@ fn handle_connect(config: &Config, alias: &str, port: u16) -> Result<()> {
                         if key_event.kind != crossterm::event::KeyEventKind::Press {
                             continue;
                         }
-                        // 将 crossterm KeyCode 转换为字节序列
                         let mut key_bytes = Vec::new();
                         match key_event.code {
                             crossterm::event::KeyCode::Char(c) => {
-                                if key_event.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                                    // Handle Ctrl+C, Ctrl+D, etc.
+                                if key_event
+                                    .modifiers
+                                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                                {
                                     if ('a'..='z').contains(&c) {
                                         key_bytes.push((c as u8) - b'a' + 1);
                                     }
@@ -172,11 +219,17 @@ fn handle_connect(config: &Config, alias: &str, port: u16) -> Result<()> {
                                 }
                             }
                             crossterm::event::KeyCode::Enter => key_bytes.push(b'\r'),
-                            crossterm::event::KeyCode::Backspace => key_bytes.push(8), // Backspace
-                            crossterm::event::KeyCode::Left => key_bytes.extend_from_slice(b"\x1b[D"),
-                            crossterm::event::KeyCode::Right => key_bytes.extend_from_slice(b"\x1b[C"),
+                            crossterm::event::KeyCode::Backspace => key_bytes.push(8),
+                            crossterm::event::KeyCode::Left => {
+                                key_bytes.extend_from_slice(b"\x1b[D")
+                            }
+                            crossterm::event::KeyCode::Right => {
+                                key_bytes.extend_from_slice(b"\x1b[C")
+                            }
                             crossterm::event::KeyCode::Up => key_bytes.extend_from_slice(b"\x1b[A"),
-                            crossterm::event::KeyCode::Down => key_bytes.extend_from_slice(b"\x1b[B"),
+                            crossterm::event::KeyCode::Down => {
+                                key_bytes.extend_from_slice(b"\x1b[B")
+                            }
                             crossterm::event::KeyCode::Tab => key_bytes.push(b'\t'),
                             crossterm::event::KeyCode::Esc => key_bytes.push(0x1b),
                             _ => {}
@@ -189,29 +242,20 @@ fn handle_connect(config: &Config, alias: &str, port: u16) -> Result<()> {
                     crossterm::event::Event::Resize(width, height) => {
                         channel.request_pty_size(width as u32, height as u32, None, None)?;
                     }
-                    _ => {} // Ignore other events
+                    _ => {}
                 }
             }
         }
 
-
-        // 从 channel 读取并打印到 stdout
         loop {
             match channel.read(&mut channel_buf) {
-                Ok(0) => {
-                    // EOF
-                    break 'main_loop;
-                }
+                Ok(0) => break 'main_loop,
                 Ok(n) => {
                     stdout.write_all(&channel_buf[..n])?;
                     stdout.flush()?;
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    // 没有更多数据了，跳出内层循环
-                    break;
-                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) => {
-                    // 发生错误
                     eprintln!("Channel read error: {}", e);
                     break 'main_loop;
                 }
@@ -219,7 +263,6 @@ fn handle_connect(config: &Config, alias: &str, port: u16) -> Result<()> {
         }
     }
 
-    // 恢复终端
     terminal::disable_raw_mode()?;
     Ok(())
 }
