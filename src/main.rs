@@ -141,7 +141,7 @@ fn handle_connect(
     sess.handshake()?;
 
     if let Some(private_key_path) = identity_path {
-        let mut attempts = 0;
+        let attempts = 0;
         loop {
             let auth_result =
                 sess.userauth_pubkey_file(user, None, private_key_path, None);
@@ -163,7 +163,6 @@ fn handle_connect(
                     return Err(anyhow!("Authentication failed with key: {}", e));
                 }
             }
-            attempts += 1;
         }
     } else {
         let password = match get_password(alias) {
