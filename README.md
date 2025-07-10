@@ -18,7 +18,7 @@
 1.  Ensure you have Rust and Cargo installed on your system. If not, get them from [rust-lang.org](https://www.rust-lang.org/).
 2.  Clone this repository:
     ```bash
-    git clone https://github.com/your-username/rss_ssh.git
+    git clone https://github.com/JenkinWang/rss_ssh.git
     cd rss_ssh
     ```
 3.  Build and install the binary:
