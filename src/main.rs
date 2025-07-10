@@ -39,6 +39,8 @@ enum Commands {
     Connect {
         #[arg(help = "The alias of the connection to use")]
         alias: String,
+        #[arg(short, long, help = "The port to connect to", default_value_t = 22)]
+        port: u16,
     },
 }
 
@@ -71,8 +73,8 @@ fn main() -> anyhow::Result<()> {
                 return Err(anyhow!("Alias '{}' not found.", alias));
             }
         }
-        Some(Commands::Connect { alias }) => {
-            handle_connect(&config, &alias)?;
+        Some(Commands::Connect { alias, port }) => {
+            handle_connect(&config, &alias, port)?;
         }
         None => {
             // 交互式模式
@@ -82,7 +84,9 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             let choice = Select::new("Select a connection to open:", aliases).prompt()?;
-            handle_connect(&config, &choice)?;
+            let port_str = inquire::Text::new("Enter port:").with_default("22").prompt()?;
+            let port = port_str.parse::<u16>().context("Invalid port number")?;
+            handle_connect(&config, &choice, port)?;
         }
     }
 
@@ -90,7 +94,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 // 连接处理函数
-fn handle_connect(config: &Config, alias: &str) -> Result<()> {
+fn handle_connect(config: &Config, alias: &str, port: u16) -> Result<()> {
     let conn_str = config.connections.get(alias)
         .context(format!("Alias '{}' not found.", alias))?;
     
@@ -115,8 +119,8 @@ fn handle_connect(config: &Config, alias: &str) -> Result<()> {
     };
     
     // 建立 SSH 连接
-    let tcp = TcpStream::connect(format!("{}:22", host))
-        .context(format!("Failed to connect to {}", host))?;
+    let tcp = TcpStream::connect(format!("{}:{}", host, port))
+        .context(format!("Failed to connect to {}:{}", host, port))?;
     let mut sess = Session::new()?;
     sess.set_tcp_stream(tcp);
     sess.handshake()?;
