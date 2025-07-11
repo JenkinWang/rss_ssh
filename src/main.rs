@@ -6,8 +6,10 @@ use crate::credentials::{delete_password, get_password, set_password};
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::terminal;
+use indicatif::{ProgressBar, ProgressStyle};
 use inquire::{Confirm, Password, Select, Text};
 use ssh2::Session;
+use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -39,6 +41,32 @@ enum Commands {
     Connect {
         #[arg(help = "The alias of the connection to use")]
         alias: String,
+        #[arg(short, long, help = "The port to connect to", default_value_t = 22)]
+        port: u16,
+        #[arg(short, long, help = "Path to the private key file")]
+        identity: Option<PathBuf>,
+    },
+    /// Upload a file to a remote directory
+    Upload {
+        #[arg(help = "The alias of the connection to use")]
+        alias: String,
+        #[arg(help = "Local file to upload")]
+        local_path: PathBuf,
+        #[arg(help = "Remote directory to save the file in")]
+        remote_path: PathBuf,
+        #[arg(short, long, help = "The port to connect to", default_value_t = 22)]
+        port: u16,
+        #[arg(short, long, help = "Path to the private key file")]
+        identity: Option<PathBuf>,
+    },
+    /// Download a file to a local directory
+    Download {
+        #[arg(help = "The alias of the connection to use")]
+        alias: String,
+        #[arg(help = "Remote file to download")]
+        remote_path: PathBuf,
+        #[arg(help = "Local directory to save the file in")]
+        local_path: PathBuf,
         #[arg(short, long, help = "The port to connect to", default_value_t = 22)]
         port: u16,
         #[arg(short, long, help = "Path to the private key file")]
@@ -83,7 +111,28 @@ fn main() -> anyhow::Result<()> {
             port,
             identity,
         }) => {
-            handle_connect(&config, &alias, port, identity.as_deref())?;
+            let sess = create_session(&config, &alias, port, identity.as_deref())?;
+            handle_interactive_shell(sess)?;
+        }
+        Some(Commands::Upload {
+            alias,
+            local_path,
+            remote_path,
+            port,
+            identity,
+        }) => {
+            let sess = create_session(&config, &alias, port, identity.as_deref())?;
+            handle_upload(sess, &local_path, &remote_path)?;
+        }
+        Some(Commands::Download {
+            alias,
+            remote_path,
+            local_path,
+            port,
+            identity,
+        }) => {
+            let sess = create_session(&config, &alias, port, identity.as_deref())?;
+            handle_download(sess, &remote_path, &local_path)?;
         }
         None => {
             // Interactive mode
@@ -107,19 +156,20 @@ fn main() -> anyhow::Result<()> {
                 None
             };
 
-            handle_connect(&config, &choice, port, identity_path.as_deref())?;
+            let sess = create_session(&config, &choice, port, identity_path.as_deref())?;
+            handle_interactive_shell(sess)?;
         }
     }
 
     Ok(())
 }
 
-fn handle_connect(
+fn create_session(
     config: &Config,
     alias: &str,
     port: u16,
     identity_path: Option<&Path>,
-) -> Result<()> {
+) -> Result<Session> {
     let conn_str = config
         .connections
         .get(alias)
@@ -134,6 +184,8 @@ fn handle_connect(
     let user = parts[0];
     let host = parts[1];
 
+    println!("Connecting to {}@{}:", user, host);
+
     let tcp = TcpStream::connect(format!("{}:{}", host, port))
         .context(format!("Failed to connect to {}:{}", host, port))?;
     let mut sess = Session::new()?;
@@ -141,7 +193,7 @@ fn handle_connect(
     sess.handshake()?;
 
     if let Some(private_key_path) = identity_path {
-        let attempts = 0;
+        let mut attempts = 0;
         loop {
             let auth_result =
                 sess.userauth_pubkey_file(user, None, private_key_path, None);
@@ -159,8 +211,10 @@ fn handle_connect(
                         {
                             break;
                         }
+                        attempts += 1;
+                    } else {
+                         return Err(anyhow!("Authentication failed with key: {}", e));
                     }
-                    return Err(anyhow!("Authentication failed with key: {}", e));
                 }
             }
         }
@@ -168,10 +222,12 @@ fn handle_connect(
         let password = match get_password(alias) {
             Ok(pass) => pass,
             Err(_) => {
-                let pass = Password::new("Enter password:")
+                let pass = Password::new(&format!("Enter password for {}:", conn_str))
                     .with_display_mode(inquire::PasswordDisplayMode::Masked)
                     .prompt()?;
-                set_password(alias, &pass)?;
+                if Confirm::new("Save password to keychain?").with_default(true).prompt()? {
+                    set_password(alias, &pass)?;
+                }
                 pass
             }
         };
@@ -179,8 +235,12 @@ fn handle_connect(
             .context("Authentication failed. Please check your username/password.")?;
     }
 
-    println!("Successfully connected to {}!", conn_str);
+    println!("Successfully connected!");
+    Ok(sess)
+}
 
+
+fn handle_interactive_shell(sess: Session) -> Result<()> {
     let mut channel = sess.channel_session()?;
     let (width, height) = terminal::size()?;
     channel.request_pty(
@@ -264,5 +324,81 @@ fn handle_connect(
     }
 
     terminal::disable_raw_mode()?;
+    Ok(())
+}
+
+fn handle_upload(sess: Session, local_path: &Path, remote_dir: &Path) -> Result<()> {
+    if !local_path.is_file() {
+        return Err(anyhow!(
+            "Local path {:?} is not a file. Please provide a path to a file to upload.",
+            local_path
+        ));
+    }
+
+    let file_name = local_path.file_name().unwrap(); // Safe due to is_file check
+    let remote_path = remote_dir.join(file_name);
+
+    let mut local_file = fs::File::open(local_path)
+        .context(format!("Failed to open local file: {:?}", local_path))?;
+    let file_size = local_file.metadata()?.len();
+
+    println!("Uploading {:?} to {:?}...", local_path, remote_path);
+
+    let pb = ProgressBar::new(file_size);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})")?
+        .progress_chars("#>- "));
+
+    let sftp = sess.sftp().context("Failed to create SFTP session")?;
+    let mut remote_file = sftp.create(&remote_path)
+        .context(format!("Failed to create remote file: {:?}", remote_path))?;
+
+    let mut reader = pb.wrap_read(&mut local_file);
+    io::copy(&mut reader, &mut remote_file)?;
+
+    pb.finish_with_message("Upload complete");
+    Ok(())
+}
+
+fn handle_download(sess: Session, remote_path: &Path, local_dir: &Path) -> Result<()> {
+    let file_name = remote_path.file_name().ok_or_else(|| {
+        anyhow!(
+            "Remote path {:?} is a directory or invalid. Please provide a path to a file to download.",
+            remote_path
+        )
+    })?;
+
+    if local_dir.is_file() {
+        return Err(anyhow!(
+            "Local destination {:?} is a file. Please provide a directory path.",
+            local_dir
+        ));
+    }
+    fs::create_dir_all(local_dir)
+        .context(format!("Failed to create local directory {:?}", local_dir))?;
+
+    let local_path = local_dir.join(file_name);
+
+    println!("Downloading {:?} to {:?}...", remote_path, local_path);
+
+    let sftp = sess.sftp().context("Failed to create SFTP session")?;
+    let mut remote_file = sftp.open(remote_path)
+        .context(format!("Failed to open remote file: {:?}", remote_path))?;
+    
+    let stat = remote_file.stat()?;
+    let file_size = stat.size.unwrap_or(0);
+
+    let pb = ProgressBar::new(file_size);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec})")?
+        .progress_chars("#>- "));
+
+    let mut local_file = fs::File::create(&local_path)
+        .context(format!("Failed to create local file: {:?}", local_path))?;
+
+    let mut reader = pb.wrap_read(&mut remote_file);
+    io::copy(&mut reader, &mut local_file)?;
+
+    pb.finish_with_message("Download complete");
     Ok(())
 }
