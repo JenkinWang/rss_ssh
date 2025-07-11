@@ -1,21 +1,18 @@
-# rssh - A Secure SSH Login Management Tool
+# rssh - Secure SSH Login Management Tool
 
-`rssh` is a command-line tool written in Rust to help you manage and connect to your SSH servers securely and efficiently. It supports connection aliasing, secure password storage in the system keychain, and authentication via both passwords and private keys.
+`rssh` is a command-line tool built with Rust that simplifies managing and connecting to SSH servers. It securely stores your connection details and passwords/keys, and provides a simple interface for adding, listing, removing, and connecting to your servers. It also supports file transfers (upload/download) with a progress bar.
 
 ## ✨ Features
 
-- **Connection Aliasing**: Save your `user@host` connections with easy-to-remember aliases.
-- **Secure Password Storage**: Automatically saves and retrieves passwords from the system's native keychain/credential store.
-- **Multiple Authentication Methods**:
-  - Connect using a securely stored password.
-  - Connect using a private key file (`-i` flag), similar to `ssh -i`.
-- **Interactive Mode**: An easy-to-use interactive menu to select and connect to a saved server if you run `rssh` without arguments.
-- **Custom Port**: Specify a custom port for your SSH connection using the `-p` flag.
-- **Cross-Platform**: Built with Rust, works on macOS, Linux, and Windows.
+- **Add, List, Remove Connections**: Easily manage your SSH connection aliases.
+- **Secure Password Storage**: Uses the system's native keychain (`keyring`) to securely store passwords.
+- **Interactive & Non-Interactive Modes**: Connect via a simple command or select from a list of saved connections.
+- **Password & Identity File Authentication**: Supports both password-based and public key-based authentication.
+- **File Transfer**: Upload and download files securely over SFTP with a visual progress bar.
 
 ## 📦 Installation
 
-1.  Ensure you have Rust and Cargo installed on your system. If not, get them from [rust-lang.org](https://www.rust-lang.org/).
+1.  Ensure you have Rust and Cargo installed.
 2.  Clone this repository:
     ```bash
     git clone https://github.com/JenkinWang/rss-ssh.git
@@ -23,7 +20,7 @@
     ```
 3.  Build and install the binary:
     ```bash
-    cargo install --path .
+    cargo build --release
     ```
 4.  Verify the installation by running:
     ```bash
@@ -32,100 +29,66 @@
 
 ## 🚀 Usage
 
-`rssh` provides several subcommands to manage your connections.
+### Connection Management
 
-### 1. `add` - Add a New Connection
+-   **Add a new connection:**
+    ```bash
+    rssh add <alias> <user@host>
+    ```
+    *Example:* `rssh add webserver user@example.com`
 
-Save a new SSH server with a unique alias.
+-   **List all saved connections:**
+    ```bash
+    rssh list
+    ```
 
-**Command:**
-```bash
-rssh add <ALIAS> <USER@HOST>
-```
+-   **Remove a connection:**
+    ```bash
+    rssh remove <alias>
+    ```
+    *Example:* `rssh remove webserver`
 
-**Example:**
-```bash
-rssh add dev-server user@192.168.1.100
-```
+### Connecting to a Server
 
-### 2. `list` - List Saved Connections
+-   **Connect using an alias:**
+    ```bash
+    rssh connect <alias> [--port <port>] [--identity /path/to/key]
+    ```
+    *Example (password):* `rssh connect webserver`
+    *Example (identity file):* `rssh connect webserver --identity ~/.ssh/id_rsa`
 
-View all your saved connection aliases.
+-   **Interactive Mode (if no command is provided):**
+    ```bash
+    rssh
+    ```
+    This will present a list of saved connections to choose from.
 
-**Command:**
-```bash
-rssh list
-```
+### File Transfer
 
-**Example Output:**
-```
-Saved connections:
-  dev-server -> user@192.168.1.100
-  prod-server -> admin@my-vps.com
-```
+-   **Upload a file to a remote directory:**
+    ```bash
+    rssh upload <alias> <local-file-path> <remote-directory-path>
+    ```
+    The command will upload the specified local file into the remote directory, keeping the original filename.
 
-### 3. `remove` - Remove a Connection
+    *Example:*
+    ```bash
+    # Uploads 'backup.zip' from the current directory to '/home/user/backups/' on the server
+    rssh upload webserver ./backup.zip /home/user/backups/
+    ```
 
-Delete a saved connection alias and its corresponding password from the keychain.
+-   **Download a file to a local directory:**
+    ```bash
+    rssh download <alias> <remote-file-path> <local-directory-path>
+    ```
+    The command will download the specified remote file into the local directory, keeping the original filename.
 
-**Command:**
-```bash
-rssh remove <ALIAS>
-```
+    *Example:*
+    ```bash
+    # Downloads '/var/log/app.log' from the server to the './logs' directory on your machine
+    rssh download webserver /var/log/app.log ./logs
+    ```
 
-**Example:**
-```bash
-rssh remove dev-server
-```
+## 📝 License
 
-### 4. `connect` - Connect to a Server
-
-Connect to a server using its alias. This is the most powerful command with several options.
-
-**Command:**
-```bash
-rssh connect <ALIAS> [OPTIONS]
-```
-
-**Options:**
-- `-p, --port <PORT>`: Specify a custom port (defaults to 22).
-- `-i, --identity <PATH>`: Provide the path to a private key file for authentication.
-
-**Connection Examples:**
-
-- **Connect using a password** (it will be prompted on first use and saved securely for later):
-  ```bash
-  rssh connect dev-server
-  ```
-
-- **Connect to a server on a custom port**:
-  ```bash
-  rssh connect dev-server -p 2222
-  ```
-
-- **Connect using a private key**:
-  ```bash
-  rssh connect dev-server -i ~/.ssh/id_rsa
-  ```
-
-- **Connect using a private key on a custom port**:
-  ```bash
-  rssh connect dev-server -p 2222 -i ~/.ssh/id_rsa_custom
-  ```
-
-### 5. Interactive Mode
-
-If you run `rssh` with no command, it enters a user-friendly interactive mode.
-
-**Command:**
-```bash
-rssh
-```
-
-**Steps:**
-1.  It will first display a list of your saved connections to choose from.
-2.  Next, it will ask for the port number, with `22` as the default.
-3.  Then, it will ask if you want to use an identity file (private key).
-4.  If you choose yes, it will prompt for the path to your key file.
-
-This mode guides you through the connection process step-by-step, making it easy to connect without remembering all the flags.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
