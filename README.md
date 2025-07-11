@@ -20,7 +20,7 @@
     ```
 3.  Build and install the binary:
     ```bash
-    cargo build --release
+    cargo install --path .
     ```
 4.  Verify the installation by running:
     ```bash
